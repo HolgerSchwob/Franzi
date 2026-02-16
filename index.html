@@ -96,10 +96,32 @@
     }
     .tiny { text-align:center; color:#6c85c7; font-size: 12px; margin-top: 12px; }
     .hidden { display:none !important; }
+    .game-buttons {
+      position: fixed;
+      bottom: calc(16px + var(--safe-bottom));
+      left: var(--safe-left); right: var(--safe-right);
+      display: flex; gap: 12px; justify-content: center; padding: 0 16px;
+      z-index: 10; pointer-events: none;
+    }
+    .game-buttons button {
+      pointer-events: auto;
+      flex: 1; max-width: 180px;
+      margin: 0; padding: 12px 16px; font-size: 15px;
+      background: rgba(11, 18, 48, 0.9);
+      border: 1px solid rgba(127, 168, 255, 0.4);
+      border-radius: 12px;
+      color: var(--txt);
+    }
+    .game-buttons button:active { transform: scale(0.98); }
   </style>
 </head>
 <body>
 <canvas id="c"></canvas>
+
+<div id="gameButtons" class="game-buttons hidden">
+  <button type="button" id="btnPause">⏸ Pause</button>
+  <button type="button" id="btnQuit">🏠 Startbildschirm</button>
+</div>
 
 <div id="menu" class="overlay">
   <div class="card">
@@ -269,7 +291,7 @@
   // —— State ——
   const state = {
     w: 0, h: 0, dpr: 1,
-    phase: 'menu', // menu | levelIntro | play | gameover
+    phase: 'menu', // menu | levelIntro | play | paused | gameover
     lastT: 0,
     stars: [],
     capsules: [],
@@ -304,12 +326,20 @@
     milestoneT: 0,
     milestoneText: '',
     lastMilestone: 0,
-    gameTime: 0,     // für Idle-Animation
+    gameTime: 0,
+    speedStreaks: [], // Star-Wars-Style Linien { x, y, len, vy, alpha }
+    topY: -80,        // für Cockpit-Perspektive (wird in spawnWave gesetzt)
+    shipYForPerspective: 0,
   };
 
   try { state.best = Number(localStorage.getItem('spacemathe_best') || 0) || 0; } catch (e) {}
 
+  const gameButtons = document.getElementById('gameButtons');
+  const btnPause = document.getElementById('btnPause');
+  const btnQuit = document.getElementById('btnQuit');
+
   resize();
+  initSpeedStreaks();
 
   // —— Build level blocks from config ——
   function buildBlocks() {
@@ -377,6 +407,30 @@
   }
   initStars();
   window.addEventListener('resize', initStars, { passive: true });
+
+  function initSpeedStreaks() {
+    state.speedStreaks.length = 0;
+    const n = 45 + Math.floor((state.w * state.h) / 45000);
+    for (let i = 0; i < n; i++) {
+      state.speedStreaks.push({
+        x: Math.random() * state.w,
+        y: Math.random() * (state.h + 200) - 100,
+        len: rand(25, 100) * state.dpr,
+        vy: rand(0.5, 2.0) * state.dpr,
+        alpha: rand(0.1, 0.4),
+      });
+    }
+    for (let i = 0; i < 25; i++) {
+      state.speedStreaks.push({
+        x: Math.random() * state.w,
+        y: Math.random() * (state.h + 150),
+        len: rand(8, 28) * state.dpr,
+        vy: rand(1.4, 2.8) * state.dpr,
+        alpha: rand(0.15, 0.5),
+      });
+    }
+  }
+  window.addEventListener('resize', initSpeedStreaks, { passive: true });
 
   function placeShip() {
     state.ship.x = state.w * 0.5;
@@ -464,6 +518,8 @@
 
     const topY = -80 * state.dpr;
     const shipY = state.ship.y;
+    state.topY = topY;
+    state.shipYForPerspective = shipY;
     const travel = shipY - topY;
     const baseV = travel / state.timeLimit;
     const v = Math.max(baseV, state.speed);
@@ -484,7 +540,7 @@
         r: (32 + (count === 4 ? -2 : 0)) * state.dpr,
         value: options[i],
         correct: options[i] === state.task.ans,
-        vy: v * rand(0.95, 1.08),
+        vy: v * rand(0.72, 1.28),
         spawnT: 0,
       });
     }
@@ -614,12 +670,14 @@
     state.phase = 'levelIntro';
     soundLevelIntro();
     placeShip();
+    gameButtons.classList.remove('hidden');
   }
 
   function gameOver() {
     state.phase = 'gameover';
     state.capsules.length = 0;
     state.combo = 0;
+    gameButtons.classList.add('hidden');
     for (let i = 0; i < 40; i++) {
       const a = Math.random() * Math.PI * 2;
       const sp = rand(0.2, 0.8) * state.dpr;
@@ -647,6 +705,7 @@
 
   function handleTap(x, y) {
     if (state.phase === 'levelIntro') return;
+    if (state.phase === 'paused') return;
     if (state.phase === 'play') {
       for (let i = 0; i < state.capsules.length; i++) {
         const c = state.capsules[i];
@@ -714,6 +773,25 @@
     }
   }
 
+  btnPause.addEventListener('click', (e) => {
+    e.preventDefault();
+    if (state.phase === 'play') {
+      state.phase = 'paused';
+      btnPause.textContent = '▶ Weiter';
+    } else if (state.phase === 'paused') {
+      state.phase = 'play';
+      btnPause.textContent = '⏸ Pause';
+    }
+  }, { passive: false });
+
+  btnQuit.addEventListener('click', (e) => {
+    e.preventDefault();
+    state.phase = 'menu';
+    menu.classList.remove('hidden');
+    gameButtons.classList.add('hidden');
+    btnPause.textContent = '⏸ Pause';
+  }, { passive: false });
+
   canvas.addEventListener('pointerdown', (e) => {
     e.preventDefault();
     handleTap(getPointerPos(e).x, getPointerPos(e).y);
@@ -776,6 +854,16 @@
       if (state.shipTrail[i].t > state.shipTrail[i].life) state.shipTrail.splice(i, 1);
     }
 
+    for (const s of state.speedStreaks) {
+      s.y -= s.vy * dt;
+      if (s.y < -s.len - 20) {
+        s.y = state.h + rand(0, 80);
+        s.x = Math.random() * state.w;
+      }
+    }
+
+    if (state.phase === 'paused') return;
+
     if (state.phase === 'levelIntro') {
       state.levelIntroT -= dt;
       if (state.levelIntroT <= 0) {
@@ -816,6 +904,35 @@
   }
 
   // —— Background by variant ——
+  function drawSpeedStreaks() {
+    for (const s of state.speedStreaks) {
+      ctx.globalAlpha = s.alpha * (1 - (state.h - s.y) / (state.h + 100)) + 0.05;
+      ctx.strokeStyle = '#b8d4ff';
+      ctx.lineWidth = Math.max(1, 2 * state.dpr);
+      ctx.lineCap = 'round';
+      ctx.beginPath();
+      ctx.moveTo(s.x, s.y);
+      ctx.lineTo(s.x, s.y + s.len);
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+  }
+
+  function drawCockpitVignette() {
+    const g = ctx.createRadialGradient(
+      state.w/2, state.h/2, state.w * 0.2,
+      state.w/2, state.h/2, state.w * 0.9
+    );
+    g.addColorStop(0, 'rgba(0,0,0,0)');
+    g.addColorStop(0.6, 'rgba(0,0,0,0)');
+    g.addColorStop(1, 'rgba(0,0,0,0.35)');
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, state.w, state.h);
+    ctx.strokeStyle = 'rgba(90, 214, 255, 0.12)';
+    ctx.lineWidth = 2 * state.dpr;
+    ctx.strokeRect(8 * state.dpr, 8 * state.dpr, state.w - 16*state.dpr, state.h - 16*state.dpr);
+  }
+
   function drawBackground() {
     const v = state.bgVariant;
     if (v === 0) {
@@ -957,12 +1074,16 @@
 
   function drawCapsule(c) {
     const spawnScale = c.spawnT < 120 ? Math.min(1, c.spawnT / 120) : 1;
+    const travel = state.shipYForPerspective - state.topY;
+    const progress = travel > 0 ? clamp((c.y - state.topY) / travel, 0, 1) : 1;
+    const perspectiveScale = 0.36 + 0.64 * progress;
     const pulse = c.spawnT > state.timeLimit - 1500
       ? 0.5 + 0.5 * Math.sin(c.spawnT * 0.01)
       : 1;
+    const scale = spawnScale * perspectiveScale;
     ctx.save();
     ctx.translate(c.x, c.y);
-    ctx.scale(spawnScale, spawnScale);
+    ctx.scale(scale, scale);
     ctx.translate(-c.x, -c.y);
     ctx.shadowColor = c.correct ? 'rgba(30, 230, 160, 0.6)' : 'rgba(90, 214, 255, 0.4)';
     ctx.shadowBlur = 12 * state.dpr;
@@ -1034,6 +1155,7 @@
     ctx.clearRect(0, 0, state.w, state.h);
 
     drawBackground();
+    drawSpeedStreaks();
 
     if (state.flashT > 0) {
       const flashAlpha = 0.2 * (state.flashT / 180);
@@ -1129,6 +1251,21 @@
 
     if (state.phase === 'levelIntro') drawLevelIntro();
     if (state.phase === 'gameover') drawGameOver();
+
+    drawCockpitVignette();
+
+    if (state.phase === 'paused') {
+      ctx.fillStyle = 'rgba(5, 8, 22, 0.78)';
+      ctx.fillRect(0, 0, state.w, state.h);
+      ctx.fillStyle = '#eaf2ff';
+      ctx.font = `bold ${Math.floor(48 * state.dpr)}px system-ui, -apple-system, Segoe UI, Arial`;
+      ctx.textAlign = 'center';
+      ctx.textBaseline = 'middle';
+      ctx.fillText('PAUSE', state.w/2, state.h/2 - 30*state.dpr);
+      ctx.font = `${Math.floor(18 * state.dpr)}px system-ui, -apple-system, Segoe UI, Arial`;
+      ctx.fillStyle = '#b9d6ff';
+      ctx.fillText('Tippe „Weiter“ unten', state.w/2, state.h/2 + 20*state.dpr);
+    }
 
     if (state.shakeT > 0) ctx.restore();
   }
