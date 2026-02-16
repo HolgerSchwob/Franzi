@@ -39,19 +39,33 @@
     .overlay {
       position:fixed;
       top: var(--safe-top); left: var(--safe-left); right: var(--safe-right); bottom: var(--safe-bottom);
-      display:flex; align-items:center; justify-content:center;
-      padding:20px; box-sizing:border-box;
+      display:flex; align-items:flex-end; justify-content:center;
+      padding:0 20px 20px; box-sizing:border-box;
       background: radial-gradient(1200px 800px at 50% 30%, rgba(90,214,255,.12), rgba(5,8,22,.94));
       color:var(--txt); font-family: system-ui, -apple-system, Segoe UI, Arial;
       overflow-y: auto;
+      transition: opacity 0.25s ease;
     }
-    .card {
+    .overlay.cockpit-enter .card {
+      transform: translateY(120%);
+      opacity: 0;
+    }
+    .overlay .card {
       width:min(540px, 94vw);
+      max-width:100%;
       background: rgba(11,18,48,.95);
       border: 1px solid rgba(127,168,255,.3);
       border-radius: 20px;
       padding: 20px 18px;
       box-shadow: 0 20px 50px rgba(0,0,0,.5);
+      transition: transform 0.45s cubic-bezier(0.22, 1, 0.36, 1), opacity 0.4s ease-out;
+      transform: translateY(0);
+      opacity: 1;
+    }
+    .overlay.cockpit-exit .card {
+      transform: translateY(120%);
+      opacity: 0;
+      transition: transform 0.35s cubic-bezier(0.55, 0, 0.9, 0.4), opacity 0.3s ease-in;
     }
     .title {
       font-size: 32px; font-weight: 800; letter-spacing:.02em;
@@ -87,6 +101,12 @@
       font-size: 18px;
     }
     button:active { transform: translateY(1px); }
+    .btn-secondary {
+      margin: 0; padding: 8px 14px; font-size: 13px;
+      background: rgba(127, 168, 255, 0.15);
+      border-color: rgba(127, 168, 255, 0.4);
+      width: auto; font-weight: 600;
+    }
     .chips { display:flex; flex-wrap:wrap; gap:8px; justify-content:center; margin-top: 12px; }
     .chip {
       font-size: 12px; color: var(--muted);
@@ -138,7 +158,10 @@
     </div>
 
     <div class="section" id="reihSection">
-      <h3>Einmaleins-Reihen (Level)</h3>
+      <div style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px; margin-bottom:8px;">
+        <h3 style="margin:0;">Einmaleins-Reihen (Level)</h3>
+        <button type="button" id="btnSelectAll" class="btn-secondary">Alles markieren</button>
+      </div>
       <div class="reihchips" id="reihChips">
         <label><input type="checkbox" name="reih" value="2" /> 2er</label>
         <label><input type="checkbox" name="reih" value="3" /> 3er</label>
@@ -327,9 +350,9 @@
     milestoneText: '',
     lastMilestone: 0,
     gameTime: 0,
-    speedStreaks: [], // Star-Wars-Style Linien { x, y, len, vy, alpha }
-    topY: -80,        // für Cockpit-Perspektive (wird in spawnWave gesetzt)
-    shipYForPerspective: 0,
+    warpTunnel: [],   // { angle, dist, speed } radial vom Zentrum
+    comets: [],       // { angle, dist, len, speed, alpha } Sternschnuppen
+    cometCooldown: 0,
   };
 
   try { state.best = Number(localStorage.getItem('spacemathe_best') || 0) || 0; } catch (e) {}
@@ -337,9 +360,31 @@
   const gameButtons = document.getElementById('gameButtons');
   const btnPause = document.getElementById('btnPause');
   const btnQuit = document.getElementById('btnQuit');
+  const btnSelectAll = document.getElementById('btnSelectAll');
+
+  function showMenuCockpitIn() {
+    menu.classList.remove('hidden');
+    menu.classList.add('cockpit-enter');
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => { menu.classList.remove('cockpit-enter'); });
+    });
+  }
+
+  function hideMenuCockpitOut(done) {
+    menu.classList.add('cockpit-exit');
+    setTimeout(() => {
+      menu.classList.add('hidden');
+      menu.classList.remove('cockpit-exit');
+      if (done) done();
+    }, 380);
+  }
 
   resize();
-  initSpeedStreaks();
+  initWarpTunnel();
+  menu.classList.add('cockpit-enter');
+  requestAnimationFrame(() => {
+    requestAnimationFrame(() => { menu.classList.remove('cockpit-enter'); });
+  });
 
   // —— Build level blocks from config ——
   function buildBlocks() {
@@ -388,6 +433,17 @@
   document.querySelectorAll('.reihchips input').forEach(el => {
     el.addEventListener('change', () => { applySettingsFromUI(); }, { passive: true });
   });
+
+  btnSelectAll.addEventListener('click', (e) => {
+    e.preventDefault();
+    cfgMul.checked = true;
+    cfgAdd.checked = true;
+    cfgSub.checked = true;
+    document.querySelectorAll('.reihchips input[name="reih"]').forEach(cb => { cb.checked = true; });
+    applySettingsFromUI();
+    updateMenuLabels();
+  }, { passive: false });
+
   applySettingsFromUI();
   updateMenuLabels();
 
@@ -408,29 +464,28 @@
   initStars();
   window.addEventListener('resize', initStars, { passive: true });
 
-  function initSpeedStreaks() {
-    state.speedStreaks.length = 0;
-    const n = 45 + Math.floor((state.w * state.h) / 45000);
-    for (let i = 0; i < n; i++) {
-      state.speedStreaks.push({
-        x: Math.random() * state.w,
-        y: Math.random() * (state.h + 200) - 100,
-        len: rand(25, 100) * state.dpr,
-        vy: rand(0.5, 2.0) * state.dpr,
-        alpha: rand(0.1, 0.4),
+  function initWarpTunnel() {
+    state.warpTunnel.length = 0;
+    const numSpokes = 36;
+    const maxDist = Math.max(state.w, state.h) * 0.85;
+    for (let i = 0; i < numSpokes; i++) {
+      const angle = (i / numSpokes) * Math.PI * 2 + rand(0, 0.1);
+      state.warpTunnel.push({
+        angle,
+        dist: Math.random() * maxDist,
+        speed: rand(0.8, 1.6) * state.dpr * (1 + state.w / 800),
       });
     }
-    for (let i = 0; i < 25; i++) {
-      state.speedStreaks.push({
-        x: Math.random() * state.w,
-        y: Math.random() * (state.h + 150),
-        len: rand(8, 28) * state.dpr,
-        vy: rand(1.4, 2.8) * state.dpr,
-        alpha: rand(0.15, 0.5),
+    const numRings = 12;
+    for (let i = 0; i < numRings; i++) {
+      state.warpTunnel.push({
+        angle: -1,
+        dist: Math.random() * maxDist * 0.5,
+        speed: rand(0.6, 1.4) * state.dpr * (1 + state.w / 800),
       });
     }
   }
-  window.addEventListener('resize', initSpeedStreaks, { passive: true });
+  window.addEventListener('resize', initWarpTunnel, { passive: true });
 
   function placeShip() {
     state.ship.x = state.w * 0.5;
@@ -516,34 +571,45 @@
     state.task = pickTask();
     const options = makeOptions(state.task.ans, state.task);
 
-    const topY = -80 * state.dpr;
-    const shipY = state.ship.y;
-    state.topY = topY;
-    state.shipYForPerspective = shipY;
-    const travel = shipY - topY;
-    const baseV = travel / state.timeLimit;
-    const v = Math.max(baseV, state.speed);
-
-    state.capsules.length = 0;
+    const cx = state.w / 2;
+    const cy = state.h * 0.46;
     const count = options.length;
-    const marginX = 44 * state.dpr;
+    const marginX = 50 * state.dpr;
     const minX = marginX;
     const maxX = state.w - marginX;
     const step = (maxX - minX) / count;
+    const laneY = state.h - 120 * state.dpr;
+    const baseR = (32 + (count === 4 ? -2 : 0)) * state.dpr;
+    const originSpreadX = 55 * state.dpr;
+    const originSpreadY = 38 * state.dpr;
 
+    state.capsules.length = 0;
     for (let i = 0; i < count; i++) {
       const laneCenter = minX + step * (i + 0.5);
-      const jitter = rand(-18, 18) * state.dpr;
-      const x = clamp(laneCenter + jitter, minX, maxX);
+      const jitter = rand(-14, 14) * state.dpr;
+      const laneX = clamp(laneCenter + jitter, minX, maxX);
       state.capsules.push({
-        x, y: topY,
-        r: (32 + (count === 4 ? -2 : 0)) * state.dpr,
+        laneX, laneY,
+        cx, cy,
+        originOffsetX: rand(-originSpreadX, originSpreadX),
+        originOffsetY: rand(-originSpreadY, originSpreadY),
+        r: baseR * rand(0.82, 1.18),
         value: options[i],
         correct: options[i] === state.task.ans,
-        vy: v * rand(0.72, 1.28),
-        spawnT: 0,
+        approachT: 0,
+        speedFactor: rand(0.74, 1.26),
       });
     }
+  }
+
+  function getCapsuleDisplay(c) {
+    const progress = Math.min(1, c.approachT / state.timeLimit);
+    const scale = 0.30 + 0.70 * progress;
+    const ox = c.cx + (c.originOffsetX || 0);
+    const oy = c.cy + (c.originOffsetY || 0);
+    const x = ox + (c.laneX - ox) * scale;
+    const y = oy + (c.laneY - oy) * scale;
+    return { x, y, scale };
   }
 
   function nextBlock() {
@@ -652,6 +718,8 @@
     state.capsules.length = 0;
     state.particles.length = 0;
     state.warpLines.length = 0;
+    state.comets.length = 0;
+    state.cometCooldown = 0;
     state.floatTexts.length = 0;
     state.sparkles.length = 0;
     state.comboPopupT = 0;
@@ -709,16 +777,18 @@
     if (state.phase === 'play') {
       for (let i = 0; i < state.capsules.length; i++) {
         const c = state.capsules[i];
-        const dx = x - c.x, dy = y - c.y;
-        if (dx*dx + dy*dy <= c.r*c.r) {
+        const d = getCapsuleDisplay(c);
+        const hitR = c.r * d.scale;
+        const dx = x - d.x, dy = y - d.y;
+        if (dx*dx + dy*dy <= hitR*hitR) {
           if (c.correct) {
             const points = 10 + state.combo * 2;
             state.score += points;
             state.combo++;
             recordResult(true);
             state.correctInBlock++;
-            burst(c.x, c.y, true);
-            addFloatText(c.x, c.y - c.r, '+' + points, '#b8ffdd');
+            burst(d.x, d.y, true);
+            addFloatText(d.x, d.y - hitR, '+' + points, '#b8ffdd');
             if (state.combo >= 2) {
               addWarpLines();
               state.comboPopupT = 600;
@@ -729,7 +799,7 @@
               }
               if (state.combo >= 3) soundCombo();
               else soundCorrect();
-              addFloatText(c.x, c.y - c.r - 30, MOTIVATIONAL[randi(0, MOTIVATIONAL.length - 1)], '#ffeb6b');
+              addFloatText(d.x, d.y - hitR - 30, MOTIVATIONAL[randi(0, MOTIVATIONAL.length - 1)], '#ffeb6b');
             } else soundCorrect();
             const nextMs = [50, 100, 150, 200, 300, 500];
             const idx = nextMs.findIndex(m => state.score >= m && state.lastMilestone < m);
@@ -739,9 +809,11 @@
               state.milestoneText = nextMs[idx] + ' Punkte!';
             }
             haptic(state.combo >= 3 ? 'heavy' : 'light');
-            addSparkles(c.x, c.y, state.combo >= 3 ? 22 : 14);
+            addSparkles(d.x, d.y, state.combo >= 3 ? 22 : 14);
             screenFlash(state.combo >= 3 ? 180 : 120);
-            for (const other of state.capsules) if (!other.correct) burst(other.x, other.y, true);
+            for (const other of state.capsules) {
+              if (!other.correct) { const od = getCapsuleDisplay(other); burst(od.x, od.y, true); }
+            }
             state.capsules.length = 0;
             updateDifficulty();
             if (state.correctInBlock >= state.CORRECT_PER_BLOCK) {
@@ -750,7 +822,7 @@
               spawnWave();
             }
           } else {
-            burst(c.x, c.y, false);
+            burst(d.x, d.y, false);
             recordResult(false);
             state.combo = 0;
             state.shield--;
@@ -769,7 +841,7 @@
       }
     } else if (state.phase === 'gameover') {
       state.phase = 'menu';
-      menu.classList.remove('hidden');
+      showMenuCockpitIn();
     }
   }
 
@@ -787,9 +859,9 @@
   btnQuit.addEventListener('click', (e) => {
     e.preventDefault();
     state.phase = 'menu';
-    menu.classList.remove('hidden');
     gameButtons.classList.add('hidden');
     btnPause.textContent = '⏸ Pause';
+    showMenuCockpitIn();
   }, { passive: false });
 
   canvas.addEventListener('pointerdown', (e) => {
@@ -801,8 +873,7 @@
     e.preventDefault();
     applySettingsFromUI();
     updateMenuLabels();
-    menu.classList.add('hidden');
-    resetGame();
+    hideMenuCockpitOut(() => { resetGame(); });
   }, { passive: false });
 
   // —— Update ——
@@ -854,12 +925,28 @@
       if (state.shipTrail[i].t > state.shipTrail[i].life) state.shipTrail.splice(i, 1);
     }
 
-    for (const s of state.speedStreaks) {
-      s.y -= s.vy * dt;
-      if (s.y < -s.len - 20) {
-        s.y = state.h + rand(0, 80);
-        s.x = Math.random() * state.w;
-      }
+    const maxTunnelDist = Math.max(state.w, state.h) * 0.92;
+    for (const sp of state.warpTunnel) {
+      sp.dist += sp.speed * dt;
+      if (sp.dist > maxTunnelDist) sp.dist = 0;
+    }
+
+    state.cometCooldown = Math.max(0, state.cometCooldown - dt);
+    if (state.cometCooldown <= 0 && state.comets.length < 2 && Math.random() < 0.0008 * dt) {
+      state.cometCooldown = 1800 + Math.random() * 2500;
+      const angle = Math.random() * Math.PI * 2;
+      state.comets.push({
+        angle,
+        dist: rand(0, 40) * state.dpr,
+        len: rand(35, 80) * state.dpr,
+        speed: rand(4, 8) * state.dpr,
+        alpha: rand(0.4, 0.75),
+      });
+    }
+    for (let i = state.comets.length - 1; i >= 0; i--) {
+      const co = state.comets[i];
+      co.dist += co.speed * dt;
+      if (co.dist > maxTunnelDist + 100) state.comets.splice(i, 1);
     }
 
     if (state.phase === 'paused') return;
@@ -876,20 +963,20 @@
     }
 
     if (state.phase === 'play') {
-      const shipY = state.ship.y;
       for (let i = 0; i < state.capsules.length; i++) {
         const c = state.capsules[i];
-        c.y += c.vy * dt;
-        c.spawnT = (c.spawnT || 0) + dt;
+        c.approachT += dt * (c.speedFactor || 1);
+        const d = getCapsuleDisplay(c);
+        c.x = d.x; c.y = d.y; c.scale = d.scale;
       }
       for (let i = state.capsules.length - 1; i >= 0; i--) {
         const c = state.capsules[i];
-        if (c.y + c.r >= shipY - state.ship.r * 0.25) {
+        if (c.approachT >= state.timeLimit) {
           recordResult(false);
           state.combo = 0;
           state.shield--;
           screenShake(380);
-          burst(c.x, shipY - state.ship.r, false);
+          burst(c.x, c.y, false);
           soundWrong();
           state.capsules.length = 0;
           if (state.shield <= 0) gameOver();
@@ -903,16 +990,51 @@
     if (state.flashT > 0) state.flashT = Math.max(0, state.flashT - dt);
   }
 
-  // —— Background by variant ——
-  function drawSpeedStreaks() {
-    for (const s of state.speedStreaks) {
-      ctx.globalAlpha = s.alpha * (1 - (state.h - s.y) / (state.h + 100)) + 0.05;
-      ctx.strokeStyle = '#b8d4ff';
-      ctx.lineWidth = Math.max(1, 2 * state.dpr);
+  function drawWarpTunnel() {
+    const cx = state.w / 2;
+    const cy = state.h * 0.5;
+    const maxD = Math.max(state.w, state.h) * 0.9;
+    for (const sp of state.warpTunnel) {
+      if (sp.angle < 0) {
+        const r = sp.dist;
+        const alpha = 0.03 + 0.08 * (1 - r / maxD);
+        ctx.strokeStyle = `rgba(100, 160, 220, ${alpha})`;
+        ctx.lineWidth = 1.2 * state.dpr;
+        ctx.beginPath();
+        ctx.arc(cx, cy, r, 0, Math.PI * 2);
+        ctx.stroke();
+      } else {
+        const dist = sp.dist;
+        const x2 = cx + Math.cos(sp.angle) * dist;
+        const y2 = cy + Math.sin(sp.angle) * dist;
+        const alpha = 0.025 + 0.11 * (1 - dist / maxD);
+        ctx.strokeStyle = `rgba(160, 200, 235, ${alpha})`;
+        ctx.lineWidth = Math.max(0.8, (0.8 + 1 * (1 - dist / (state.w * 0.8))) * state.dpr);
+        ctx.lineCap = 'round';
+        ctx.beginPath();
+        ctx.moveTo(cx, cy);
+        ctx.lineTo(x2, y2);
+        ctx.stroke();
+      }
+    }
+    for (const co of state.comets) {
+      const x1 = cx + Math.cos(co.angle) * (co.dist - co.len);
+      const y1 = cy + Math.sin(co.angle) * (co.dist - co.len);
+      const x2 = cx + Math.cos(co.angle) * co.dist;
+      const y2 = cy + Math.sin(co.angle) * co.dist;
+      const a = co.alpha * (1 - co.dist / (maxD * 1.1));
+      ctx.strokeStyle = `rgba(255, 255, 255, ${a})`;
+      ctx.lineWidth = (2.5 + 1.5 * (1 - co.dist / maxD)) * state.dpr;
       ctx.lineCap = 'round';
       ctx.beginPath();
-      ctx.moveTo(s.x, s.y);
-      ctx.lineTo(s.x, s.y + s.len);
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
+      ctx.stroke();
+      ctx.strokeStyle = `rgba(200, 230, 255, ${a * 0.7})`;
+      ctx.lineWidth = 1.2 * state.dpr;
+      ctx.beginPath();
+      ctx.moveTo(x1, y1);
+      ctx.lineTo(x2, y2);
       ctx.stroke();
     }
     ctx.globalAlpha = 1;
@@ -1073,30 +1195,28 @@
   }
 
   function drawCapsule(c) {
-    const spawnScale = c.spawnT < 120 ? Math.min(1, c.spawnT / 120) : 1;
-    const travel = state.shipYForPerspective - state.topY;
-    const progress = travel > 0 ? clamp((c.y - state.topY) / travel, 0, 1) : 1;
-    const perspectiveScale = 0.36 + 0.64 * progress;
-    const pulse = c.spawnT > state.timeLimit - 1500
-      ? 0.5 + 0.5 * Math.sin(c.spawnT * 0.01)
+    const scale = c.scale || getCapsuleDisplay(c).scale;
+    const px = c.x;
+    const py = c.y;
+    const pulse = c.approachT > state.timeLimit - 1400
+      ? 0.6 + 0.4 * Math.sin(c.approachT * 0.012)
       : 1;
-    const scale = spawnScale * perspectiveScale;
     ctx.save();
-    ctx.translate(c.x, c.y);
+    ctx.translate(px, py);
     ctx.scale(scale, scale);
-    ctx.translate(-c.x, -c.y);
-    ctx.shadowColor = c.correct ? 'rgba(30, 230, 160, 0.6)' : 'rgba(90, 214, 255, 0.4)';
-    ctx.shadowBlur = 12 * state.dpr;
+    ctx.translate(-px, -py);
+    ctx.shadowColor = c.correct ? 'rgba(30, 230, 160, 0.6)' : 'rgba(90, 214, 255, 0.45)';
+    ctx.shadowBlur = 10 * state.dpr;
     ctx.globalAlpha = 0.95 * pulse;
     ctx.fillStyle = '#2b4cff';
     ctx.beginPath();
-    ctx.arc(c.x, c.y, c.r, 0, Math.PI*2);
+    ctx.arc(px, py, c.r, 0, Math.PI*2);
     ctx.fill();
 
     ctx.globalAlpha = 0.88;
     ctx.fillStyle = '#0b1230';
     ctx.beginPath();
-    ctx.arc(c.x, c.y, c.r*0.82, 0, Math.PI*2);
+    ctx.arc(px, py, c.r*0.82, 0, Math.PI*2);
     ctx.fill();
     ctx.globalAlpha = 1;
 
@@ -1105,12 +1225,12 @@
     ctx.font = `${Math.floor(c.r*0.9)}px system-ui, -apple-system, Segoe UI, Arial`;
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
-    ctx.fillText(String(c.value), c.x, c.y + 1*state.dpr);
+    ctx.fillText(String(c.value), px, py + 1*state.dpr);
 
     ctx.globalAlpha = 0.2;
     ctx.fillStyle = '#fff';
     ctx.beginPath();
-    ctx.arc(c.x - c.r*0.25, c.y - c.r*0.3, c.r*0.35, 0, Math.PI*2);
+    ctx.arc(px - c.r*0.25, py - c.r*0.3, c.r*0.35, 0, Math.PI*2);
     ctx.fill();
     ctx.globalAlpha = 1;
     ctx.restore();
@@ -1155,7 +1275,7 @@
     ctx.clearRect(0, 0, state.w, state.h);
 
     drawBackground();
-    drawSpeedStreaks();
+    drawWarpTunnel();
 
     if (state.flashT > 0) {
       const flashAlpha = 0.2 * (state.flashT / 180);
