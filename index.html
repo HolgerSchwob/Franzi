@@ -133,6 +133,12 @@
       color: var(--txt);
     }
     .game-buttons button:active { transform: scale(0.98); }
+    @keyframes fadeInOut {
+      0% { opacity: 0; transform: translate(-50%, -8px); }
+      12% { opacity: 1; transform: translate(-50%, 0); }
+      88% { opacity: 1; transform: translate(-50%, 0); }
+      100% { opacity: 0; transform: translate(-50%, -4px); }
+    }
   </style>
 </head>
 <body>
@@ -353,6 +359,9 @@
     warpTunnel: [],   // { angle, dist, speed } radial vom Zentrum
     comets: [],       // { angle, dist, len, speed, alpha } Sternschnuppen
     cometCooldown: 0,
+    checkboxesLocked: true,
+    unlockClickCount: 0,
+    unlockClickTime: 0,
   };
 
   try { state.best = Number(localStorage.getItem('spacemathe_best') || 0) || 0; } catch (e) {}
@@ -363,6 +372,7 @@
   const btnSelectAll = document.getElementById('btnSelectAll');
 
   function showMenuCockpitIn() {
+    ensureLockedReihState();
     menu.classList.remove('hidden');
     menu.classList.add('cockpit-enter');
     requestAnimationFrame(() => {
@@ -386,14 +396,17 @@
     requestAnimationFrame(() => { menu.classList.remove('cockpit-enter'); });
   });
 
-  // —— Build level blocks from config ——
   function buildBlocks() {
     const blocks = [];
     if (cfgMul.checked) {
-      document.querySelectorAll('.reihchips input[name="reih"]:checked').forEach(cb => {
-        const row = Number(cb.value);
-        blocks.push({ type: 'mul', row, title: `${row}er-Reihe` });
-      });
+      if (state.checkboxesLocked) {
+        for (let row = 2; row <= 10; row++) blocks.push({ type: 'mul', row, title: `${row}er-Reihe` });
+      } else {
+        document.querySelectorAll('.reihchips input[name="reih"]:checked').forEach(cb => {
+          const row = Number(cb.value);
+          blocks.push({ type: 'mul', row, title: `${row}er-Reihe` });
+        });
+      }
     }
     if (cfgAdd.checked) blocks.push({ type: 'addZehner', title: 'Addition über 10' });
     if (cfgSub.checked) blocks.push({ type: 'subZehner', title: 'Subtraktion über 10' });
@@ -430,9 +443,46 @@
   [cfgMul, cfgAdd, cfgSub].forEach(el => {
     el.addEventListener('change', () => { applySettingsFromUI(); }, { passive: true });
   });
-  document.querySelectorAll('.reihchips input').forEach(el => {
-    el.addEventListener('change', () => { applySettingsFromUI(); }, { passive: true });
+
+  document.querySelectorAll('.reihchips input[name="reih"]').forEach(el => {
+    el.addEventListener('change', function() {
+      if (state.checkboxesLocked && !this.checked) {
+        this.checked = true;
+        return;
+      }
+      applySettingsFromUI();
+    }, { passive: true });
   });
+
+  const reihSection = document.getElementById('reihSection');
+  reihSection.addEventListener('click', (e) => {
+    const now = Date.now();
+    if (now - state.unlockClickTime > 15000) state.unlockClickCount = 0;
+    state.unlockClickCount++;
+    state.unlockClickTime = now;
+    if (state.unlockClickCount >= 3) {
+      state.checkboxesLocked = false;
+      state.unlockClickCount = 0;
+      playTone(523, 0.1, 'sine', 0.2);
+      setTimeout(() => playTone(659, 0.1, 'sine', 0.2), 120);
+      setTimeout(() => playTone(784, 0.15, 'sine', 0.22), 240);
+      showBackdoorFeedback();
+    }
+    if (!state.checkboxesLocked) applySettingsFromUI();
+  }, { passive: true });
+
+  function showBackdoorFeedback() {
+    const el = document.createElement('div');
+    el.id = 'backdoorFeedback';
+    el.setAttribute('style', 'position:absolute;left:50%;transform:translateX(-50%);top:12px;background:rgba(30,180,120,0.95);color:#fff;padding:10px 18px;border-radius:12px;font-size:14px;font-weight:700;z-index:100;box-shadow:0 4px 20px rgba(0,0,0,.4);animation:fadeInOut 2.5s ease forwards;');
+    el.textContent = 'Reihen frei wählbar';
+    const card = document.querySelector('#menu .card');
+    if (card) {
+      card.style.position = 'relative';
+      card.appendChild(el);
+      setTimeout(() => { if (el.parentNode) el.remove(); }, 2500);
+    }
+  }
 
   btnSelectAll.addEventListener('click', (e) => {
     e.preventDefault();
@@ -440,10 +490,17 @@
     cfgAdd.checked = true;
     cfgSub.checked = true;
     document.querySelectorAll('.reihchips input[name="reih"]').forEach(cb => { cb.checked = true; });
-    applySettingsFromUI();
+    if (!state.checkboxesLocked) applySettingsFromUI();
     updateMenuLabels();
   }, { passive: false });
 
+  function ensureLockedReihState() {
+    if (!state.checkboxesLocked) return;
+    cfgMul.checked = true;
+    document.querySelectorAll('.reihchips input[name="reih"]').forEach(cb => { cb.checked = true; });
+  }
+
+  ensureLockedReihState();
   applySettingsFromUI();
   updateMenuLabels();
 
@@ -572,32 +629,39 @@
     const options = makeOptions(state.task.ans, state.task);
 
     const cx = state.w / 2;
-    const cy = state.h * 0.46;
+    const cy = state.h * 0.48;
     const count = options.length;
-    const marginX = 50 * state.dpr;
+    const baseR = (32 + (count === 4 ? -2 : 0)) * 3 * state.dpr;
+    const minGap = baseR * 2.2;
+    const marginX = Math.max(50 * state.dpr, minGap * 0.6);
     const minX = marginX;
     const maxX = state.w - marginX;
-    const step = (maxX - minX) / count;
-    const laneY = state.h - 120 * state.dpr;
-    const baseR = (32 + (count === 4 ? -2 : 0)) * state.dpr;
-    const originSpreadX = 55 * state.dpr;
+    const step = Math.max((maxX - minX) / count, minGap);
+    const originSpreadX = 50 * state.dpr;
     const originSpreadY = 38 * state.dpr;
+
+    const bandGap = minGap / state.h;
+    const bandTop = 0.18;
+    const bandRange = (count - 1) * bandGap;
+    const bandBottom = Math.min(0.88, bandTop + bandRange);
+    const bandStep = count > 1 ? (bandBottom - bandTop) / (count - 1) : 0;
 
     state.capsules.length = 0;
     for (let i = 0; i < count; i++) {
       const laneCenter = minX + step * (i + 0.5);
-      const jitter = rand(-14, 14) * state.dpr;
-      const laneX = clamp(laneCenter + jitter, minX, maxX);
+      const jitterX = rand(-6, 6) * state.dpr;
+      const laneX = clamp(laneCenter + jitterX, minX, maxX);
+      const laneY = state.h * (bandTop + i * bandStep + rand(-0.01, 0.01));
       state.capsules.push({
         laneX, laneY,
         cx, cy,
         originOffsetX: rand(-originSpreadX, originSpreadX),
         originOffsetY: rand(-originSpreadY, originSpreadY),
-        r: baseR * rand(0.82, 1.18),
+        r: baseR * rand(0.95, 1.05),
         value: options[i],
         correct: options[i] === state.task.ans,
         approachT: 0,
-        speedFactor: rand(0.74, 1.26),
+        speedFactor: rand(0.88, 1.12),
       });
     }
   }
@@ -1120,6 +1184,25 @@
     ctx.globalAlpha = 1;
   }
 
+  function drawTaskInSpace() {
+    if (state.phase !== 'play' || !state.task) return;
+    const cx = state.w / 2;
+    const ty = 88 * state.dpr;
+    const taskStr = state.task.text + ' = ?';
+    const fontSize = Math.floor(72 * state.dpr);
+    ctx.font = `bold ${fontSize}px system-ui, -apple-system, Segoe UI, Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.85)';
+    ctx.shadowBlur = 14 * state.dpr;
+    ctx.strokeStyle = 'rgba(90, 214, 255, 0.5)';
+    ctx.lineWidth = 4 * state.dpr;
+    ctx.strokeText(taskStr, cx, ty);
+    ctx.fillStyle = '#eaf2ff';
+    ctx.fillText(taskStr, cx, ty);
+    ctx.shadowBlur = 0;
+  }
+
   function drawHUD() {
     const pad = 16 * state.dpr;
     const top = 10 * state.dpr;
@@ -1128,13 +1211,6 @@
     roundedRectPath(pad, top, state.w - pad*2, 86 * state.dpr, 16 * state.dpr);
     ctx.fill();
     ctx.globalAlpha = 1;
-
-    ctx.fillStyle = '#eaf2ff';
-    ctx.font = `${Math.floor(34 * state.dpr)}px system-ui, -apple-system, Segoe UI, Arial`;
-    ctx.textAlign = 'left';
-    ctx.textBaseline = 'middle';
-    const taskText = (state.phase === 'play' && state.task) ? `${state.task.text} = ?` : 'SpaceMathe';
-    ctx.fillText(taskText, pad*1.6, top + 43*state.dpr);
 
     const hx = state.w - pad*1.6;
     const hy = top + 43*state.dpr;
@@ -1302,6 +1378,7 @@
     }
     ctx.globalAlpha = 1;
     drawHUD();
+    drawTaskInSpace();
     drawShip();
     for (const c of state.capsules) drawCapsule(c);
 
