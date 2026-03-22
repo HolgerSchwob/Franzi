@@ -240,6 +240,9 @@
   const Z_FAR  = 5.0;  // starts far away (tiny, near center)
   const Z_NEAR = 0.7;  // closest approach (large, near ship)
   const VP_Y   = 0.35; // vanishing point Y as fraction of screen height
+  /** Mehr horizontaler Abstand am Anfang (Perspektive), damit Kugeln nicht übereinanderliegen */
+  const START_H_SPREAD_EXTRA = 2.35;
+  const DEADLINE_WARN_MS = 3000;
 
   // ── Resize ──────────────────────────────────────────────────────────────────
   function resize() {
@@ -540,9 +543,9 @@
 
     // FIX: was * 3 which caused huge overlapping capsules
     const baseR  = (36 + (count===4 ? -4 : 0)) * state.dpr;
-    const minGap = baseR * 2.5;
+    const minGap = baseR * 3.15;
 
-    const marginX = Math.max(52 * state.dpr, minGap * 0.55);
+    const marginX = Math.max(56 * state.dpr, minGap * 0.62);
     const minX = marginX, maxX = state.w - marginX;
     const step = Math.max((maxX - minX) / count, minGap);
 
@@ -556,7 +559,7 @@
     state.capsules.length = 0;
     for (let i = 0; i < count; i++) {
       const laneCenter = minX + step * (i + 0.5);
-      const tx = clamp(laneCenter + rand(-6,6)*state.dpr, minX, maxX);
+      const tx = clamp(laneCenter + rand(-2,2)*state.dpr, minX, maxX);
       // World coords: screen = vp + world/z  →  world = (screen - vp) * z
       const wx = (tx - vpX) * Z_NEAR;
       const wy = (targetY - vpY) * Z_NEAR;
@@ -583,7 +586,8 @@
     const p    = clamp(c.approachT / state.timeLimit, 0, 1);
     const z    = Z_FAR + (Z_NEAR - Z_FAR) * p;
     const vpX  = state.w / 2, vpY = state.h * VP_Y;
-    const x    = vpX + c.wx / z;
+    const spreadMul = 1 + (1 - p) * START_H_SPREAD_EXTRA;
+    const x    = vpX + (c.wx * spreadMul) / z;
     const y    = vpY + c.wy / z;
     // sqrt-scale: starts more visible (≈37% of full size) and rushes larger at end
     const r    = c.baseR * Math.sqrt(Z_NEAR / z);
@@ -966,6 +970,54 @@
     ctx.globalAlpha=1;
   }
 
+  function getDeadlineRemainingMs() {
+    if (state.phase !== 'play' || !state.capsules.length || state.wrongAnswerT > 0) return Infinity;
+    let m = Infinity;
+    for (const c of state.capsules) {
+      const r = state.timeLimit - c.approachT;
+      if (r < m) m = r;
+    }
+    return m;
+  }
+
+  function drawDeadlineUrgency() {
+    const rem = getDeadlineRemainingMs();
+    if (!(rem > 0 && rem <= DEADLINE_WARN_MS)) return;
+    const phase = 1 - rem / DEADLINE_WARN_MS;
+    const blink = 0.45 + 0.55 * Math.sin(state.gameTime * 0.024);
+    const a = (0.1 + 0.22 * phase) * blink;
+    const cx = state.w / 2, cy = state.h * 0.42;
+    const rad = Math.max(state.w, state.h) * 0.72;
+    const g = ctx.createRadialGradient(cx, cy, 0, cx, cy, rad);
+    g.addColorStop(0, `rgba(255,120,90,${a * 0.45})`);
+    g.addColorStop(0.5, `rgba(255,50,60,${a * 0.85})`);
+    g.addColorStop(1, `rgba(80,10,40,${a})`);
+    ctx.fillStyle = g;
+    ctx.fillRect(0, 0, state.w, state.h);
+
+    const edgeH = (8 + 14 * phase) * state.dpr * blink;
+    ctx.fillStyle = `rgba(255,230,120,${0.35 * blink})`;
+    ctx.fillRect(0, 0, state.w, edgeH);
+    ctx.fillRect(0, state.h - edgeH, state.w, edgeH);
+    ctx.fillStyle = `rgba(255,230,120,${0.28 * blink})`;
+    ctx.fillRect(0, 0, edgeH, state.h);
+    ctx.fillRect(state.w - edgeH, 0, edgeH, state.h);
+
+    ctx.save();
+    ctx.globalAlpha = 0.55 + 0.35 * blink;
+    ctx.fillStyle = '#ff4466';
+    ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+    ctx.lineWidth = 3 * state.dpr;
+    ctx.font = `bold ${Math.floor(26 * state.dpr)}px system-ui,-apple-system,Segoe UI,Arial`;
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'middle';
+    const sec = Math.max(0, rem / 1000).toFixed(1);
+    const msg = `Zeit läuft! ~${sec}s`;
+    ctx.strokeText(msg, cx, state.h * 0.14);
+    ctx.fillText(msg, cx, state.h * 0.14);
+    ctx.restore();
+  }
+
   function drawTaskInSpace() {
     if (state.phase!=='play'||!state.task) return;
     const cx=state.w/2, ty=122*state.dpr;
@@ -994,8 +1046,11 @@
 
   function drawTimerBar() {
     if (state.phase!=='play'||!state.capsules.length) return;
-    const progress=clamp(state.capsules[0].approachT/state.timeLimit,0,1);
+    const rem = getDeadlineRemainingMs();
+    const progress = rem === Infinity ? 0 : clamp(1 - rem / state.timeLimit, 0, 1);
     const barW=state.w-80*state.dpr, barX=40*state.dpr, barY=162*state.dpr, barH=7*state.dpr, r=barH/2;
+    const urgent = rem <= DEADLINE_WARN_MS && rem > 0;
+    const pulse = urgent ? 0.65 + 0.35 * Math.sin(state.gameTime * 0.028) : 1;
 
     // track
     ctx.globalAlpha=.3; ctx.fillStyle='#1a2550';
@@ -1004,12 +1059,19 @@
     // fill
     const filled=barW*(1-progress);
     if (filled>0) {
-      const hue=130-progress*130; // green → red
-      const col=`hsl(${hue},90%,55%)`;
-      ctx.globalAlpha=.92; ctx.fillStyle=col;
-      ctx.shadowColor=col; ctx.shadowBlur=8*state.dpr;
+      const hue=urgent ? (rem/DEADLINE_WARN_MS)*18 : 130-progress*130;
+      const col=`hsl(${hue},${urgent?96:90}%,${urgent?58:55}%)`;
+      ctx.globalAlpha=.92*pulse; ctx.fillStyle=col;
+      ctx.shadowColor=col; ctx.shadowBlur=(urgent?16:8)*state.dpr*pulse;
       roundedRectPath(barX,barY,filled,barH,r); ctx.fill();
       ctx.shadowBlur=0;
+    }
+    if (urgent) {
+      ctx.globalAlpha = 0.5 + 0.4 * pulse;
+      ctx.strokeStyle = 'rgba(255,255,255,0.9)';
+      ctx.lineWidth = 2.5 * state.dpr;
+      roundedRectPath(barX - 2 * state.dpr, barY - 2 * state.dpr, barW + 4 * state.dpr, barH + 4 * state.dpr, r + 2 * state.dpr);
+      ctx.stroke();
     }
     ctx.globalAlpha=1;
   }
@@ -1089,7 +1151,8 @@
   function drawCapsule(c) {
     const scale=c.scale||getCapsuleDisplay(c).scale;
     const px=c.x, py=c.y;
-    const pulse=c.approachT>state.timeLimit-1400 ? .62+.38*Math.sin(c.approachT*.016) : 1;
+    const remCaps = state.timeLimit - c.approachT;
+    const pulse = remCaps <= DEADLINE_WARN_MS && remCaps > 0 ? .58 + .42 * Math.sin(c.approachT * .018) : 1;
     const col=c.color||'#5ad6ff';
     const glowCol=c.glow||'rgba(90,214,255,.75)';
 
@@ -1300,6 +1363,7 @@
     }
 
     if (state.phase==='levelIntro') drawLevelIntro();
+    drawDeadlineUrgency();
     if (state.wrongAnswerT>0) drawWrongAnswerFeedback();
     if (state.phase==='gameover') drawGameOver();
 
